@@ -35,8 +35,30 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
+      - name: Install Noir
+        run: |
+          curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash
+          export PATH="$HOME/.nargo/bin:$PATH"
+          noirup --version 1.0.0-beta.22
+          echo "$HOME/.nargo/bin" >> $GITHUB_PATH
+
+      - name: Install Barretenberg
+        run: |
+          curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/refs/heads/next/barretenberg/bbup/install | bash
+          export PATH="$HOME/.bb:$PATH"
+          bbup -v 5.0.0-nightly.20260522
+          echo "$HOME/.bb" >> $GITHUB_PATH
+
       - name: Show Forge version
         run: forge --version
+
+      - name: Regenerate verifier artifacts
+        working-directory: circuits
+        run: ./generate_verifiers.sh
+
+      - name: Verify generated artifacts are up to date
+        run: |
+          git diff --exit-code
 
       - name: Run Forge build
         run: forge build --sizes
