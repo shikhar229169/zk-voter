@@ -26,7 +26,7 @@ async function generateCommitmentWithProof(): Promise<string> {
 
     const {nullifier, secret, commitment} = await generateCommitment(proposalId, bb);
 
-    const circuitPath = path.resolve(__dirname, "../../circuits/target/commitment.json");
+    const circuitPath = path.resolve(__dirname, "../circuits/target/commitment.json");
     const circuit = JSON.parse(fs.readFileSync(circuitPath, "utf-8"));
     const noirCircuit = new Noir(circuit);
     const provingBackend = new UltraHonkBackend(circuit.bytecode, bb);

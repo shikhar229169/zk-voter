@@ -21,7 +21,7 @@ async function generateVoteProof(): Promise<string> {
         throw new Error("Leaves count mismatch");
     }
 
-    const circuitPath = path.resolve(__dirname, "../../circuits/target/vote.json");
+    const circuitPath = path.resolve(__dirname, "../circuits/target/vote.json");
     const circuitJSON = JSON.parse(fs.readFileSync(circuitPath, 'utf-8'));
     const voteCircuit = new Noir(circuitJSON);
     const bb = await Barretenberg.new({threads: 1});
