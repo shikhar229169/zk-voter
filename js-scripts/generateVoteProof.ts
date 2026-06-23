@@ -21,6 +21,15 @@ async function generateVoteProof(): Promise<string> {
         throw new Error("Leaves count mismatch");
     }
 
+    const nullifierLeavesCount = parseInt(args[5 + leaves]);
+    
+    if (isNaN(nullifierLeavesCount) || nullifierLeavesCount <= 0) {
+        throw new Error("Invalid nullifier leaves length");
+    }
+    
+    const nullifierLeaveStartIndex = 5 + leaves + 1;
+    const nullifierLeaves = args.slice(nullifierLeaveStartIndex, nullifierLeaveStartIndex + nullifierLeavesCount);
+
     const circuitPath = path.resolve(__dirname, "../circuits/target/vote.json");
     const circuitJSON = JSON.parse(fs.readFileSync(circuitPath, 'utf-8'));
     const voteCircuit = new Noir(circuitJSON);
@@ -58,10 +67,37 @@ async function generateVoteProof(): Promise<string> {
     const { proof } = await provingBackend.generateProof(witness, { verifierTarget: 'evm' });
 
     console.log = consoleLog;
+
+    const votedProofCktPath = path.resolve(__dirname, "../circuits/target/voted_proof.json");
+    const votedProofCktJson = JSON.parse(fs.readFileSync(votedProofCktPath, 'utf-8'));
+    const votedProofCircuit = new Noir(votedProofCktJson);
+    const votedProofCktProvingBackend = new UltraHonkBackend(votedProofCktJson.bytecode, bb);
+
+    const nullifierMerkleTree = await getMerkleTree(nullifierLeaves);
+    const nullifierIndex = nullifierMerkleTree.getIndex(convertToBytesString(nullifierHash.hash));
+    const nullifierMerkleProof = nullifierMerkleTree.proof(nullifierIndex);
+
+    const votedProofCktInputs = {
+        commitment: commitmentStr,
+        proposal_id: proposalId,
+        nullifier_merkle_root: nullifierMerkleProof.root,
+        nullifier: nullifier,
+        secret: secret,
+        merkle_proof: nullifierMerkleProof.pathElements.map((r: any) => r.toString()),
+        is_even: nullifierMerkleProof.pathIndices.map((r: any) => r % 2 == 0),
+    };
+
+    const { witness: votedProofWitness } = await votedProofCircuit.execute(votedProofCktInputs);
+
+    console.log = () => {};
+
+    const { proof: votedProof } = await votedProofCktProvingBackend.generateProof(votedProofWitness, { verifierTarget: 'evm' });
     
+    console.log = consoleLog;
+
     return ethers.AbiCoder.defaultAbiCoder().encode(
-        ['bytes', 'bytes32', 'bytes32'],
-        [proof, commitmentMerkleProof.root, nullifierHash.hash],
+        ['bytes', 'bytes', 'bytes32', 'bytes32', 'bytes32'],
+        [proof, votedProof, commitmentMerkleProof.root, nullifierHash.hash, nullifierMerkleProof.root],
     );
 }
 
