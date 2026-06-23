@@ -1,5 +1,5 @@
 [package]
-name = "vote"
+name = "voted_proof"
 type = "bin"
 authors = [""]
 

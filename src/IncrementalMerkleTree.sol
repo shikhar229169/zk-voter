@@ -4,25 +4,40 @@ pragma solidity 0.8.35;
 
 import {Poseidon2_BN254 as Poseidon2, Field} from "@poseidon/src/bn254/solidity/Poseidon2.sol";
 
-contract IncrementalMerkleTree {
+library IncrementalMerkleTree {
     error IncrementalMerkleTree__DepthShouldBeMoreThanZero();
     error IncrementalMerkleTree__DepthShouldBeLessThan32();
     error IncrementalMerkleTree__IndexOutOfBounds(uint256 index);
     error IncrementalMerkleTree__MaxLeavesReached();
+    error IncrementalMerkleTree__AlreadyInitialized();
+    error IncrementalMerkleTree__NotInitialized();
 
-    uint32 public immutable i_depth;
-    uint32 public s_nextLeafIndex;
-    uint32 public immutable i_maxLeaves;
-    // bytes32 public s_root;
-    mapping(uint256 => bytes32) public s_roots;
-    uint32 public constant ROOT_HISTORY_SIZE = 30;
-    uint32 public s_currentRootIndex;
+    struct MerkleTree {
+        uint32 depth;
+        uint32 nextLeafIndex;
+        uint32 maxLeaves;
+        mapping(uint256 => bytes32) merkleRoots;
+        uint32 currentRootIndex;
+        mapping(uint32 => bytes32) cachedSubtree;
+        Poseidon2 hasher;
+        bool initialized;
+    }
 
-    mapping(uint32 => bytes32) s_cachedSubtree;
-    Poseidon2 public immutable i_hasher;
-    uint256 public constant FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+    uint32 internal constant ROOT_HISTORY_SIZE = 30;
+    uint256 internal constant FIELD_MODULUS = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
 
-    constructor(uint32 _depth, Poseidon2 _hasher) {
+    modifier onlyInitialized(MerkleTree storage tree) {
+        if (!tree.initialized) {
+            revert IncrementalMerkleTree__NotInitialized();
+        }
+        _;
+    }
+
+    function init(MerkleTree storage tree, uint32 _depth, Poseidon2 _hasher) internal {
+        if (tree.initialized) {
+            revert IncrementalMerkleTree__AlreadyInitialized();
+        }
+
         if (_depth == 0) {
             revert IncrementalMerkleTree__DepthShouldBeMoreThanZero();
         }
@@ -31,35 +46,40 @@ contract IncrementalMerkleTree {
             revert IncrementalMerkleTree__DepthShouldBeLessThan32();
         }
 
-        i_depth = _depth;
-        i_maxLeaves = uint32(2) ** _depth;
-        s_roots[0] = zeros(_depth);
-        i_hasher = _hasher;
+        tree.depth = _depth;
+        tree.maxLeaves = uint32(2) ** _depth;
+        tree.merkleRoots[0] = zeros(_depth);
+        tree.hasher = _hasher;
+        tree.initialized = true;
     }
 
-    function _insert(bytes32 _leaf) internal returns (uint32) {
-        uint32 _nextLeafIndex = s_nextLeafIndex++;
-        if (_nextLeafIndex >= i_maxLeaves) {
+    function insert(MerkleTree storage tree, bytes32 _leaf) internal onlyInitialized(tree) returns (uint32) {
+        uint32 _nextLeafIndex = tree.nextLeafIndex++;
+        if (_nextLeafIndex >= tree.maxLeaves) {
             revert IncrementalMerkleTree__MaxLeavesReached();
         }
+
+        mapping(uint32 => bytes32) storage cachedSubtree = tree.cachedSubtree;
 
         uint32 currentIdx = _nextLeafIndex;
         bytes32 currentHash = _leaf;
 
-        for (uint32 i = 0; i < i_depth; ) {
+        uint256 _depth = tree.depth;
+
+        for (uint32 i = 0; i < _depth; ) {
             bytes32 left;
             bytes32 right;
-            if (_nextLeafIndex % 2 == 0) {
+            if (currentIdx % 2 == 0) {
                 left = currentHash;
                 right = zeros(i);
-                s_cachedSubtree[i] = currentHash;
+                cachedSubtree[i] = currentHash;
             }
             else {
-                left = s_cachedSubtree[i];
+                left = cachedSubtree[i];
                 right = currentHash;
             }
 
-            currentHash = Field.toBytes32(i_hasher.hash_2(Field.toField(left), Field.toField(right)));
+            currentHash = Field.toBytes32(tree.hasher.hash_2(Field.toField(left), Field.toField(right)));
             currentIdx = currentIdx / 2;
 
             unchecked {
@@ -67,19 +87,19 @@ contract IncrementalMerkleTree {
             }
         }
 
-        uint32 newRootIndex = (s_currentRootIndex + 1) % ROOT_HISTORY_SIZE;
-        s_currentRootIndex = newRootIndex;
-        s_roots[newRootIndex] = currentHash;
+        uint32 newRootIndex = (tree.currentRootIndex + 1) % ROOT_HISTORY_SIZE;
+        tree.currentRootIndex = newRootIndex;
+        tree.merkleRoots[newRootIndex] = currentHash;
         return _nextLeafIndex;
     }
 
-    function isKnownRoot(bytes32 _root) public view returns (bool) {
+    function isKnownRoot(MerkleTree storage tree, bytes32 _root) internal view onlyInitialized(tree) returns (bool) {
         if (_root == bytes32(0)) {
             return false;
         }
 
         for (uint256 i = 0; i < ROOT_HISTORY_SIZE; ) {
-            if (s_roots[i] == _root) {
+            if (tree.merkleRoots[i] == _root) {
                 return true;
             }
 
@@ -91,7 +111,7 @@ contract IncrementalMerkleTree {
         return false;
     }
 
-    function zeros(uint256 i) public pure returns (bytes32) {
+    function zeros(uint256 i) internal pure returns (bytes32) {
         if (i == 0) return bytes32(0x0d823319708ab99ec915efd4f7e03d11ca1790918e8f04cd14100aceca2aa9ff);
         else if (i == 1) return bytes32(0x170a9598425eb05eb8dc06986c6afc717811e874326a79576c02d338bdf14f13);
         else if (i == 2) return bytes32(0x273b1a40397b618dac2fc66ceb71399a3e1a60341e546e053cbfa5995e824caf);

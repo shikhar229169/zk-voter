@@ -4,9 +4,10 @@ pragma solidity 0.8.35;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {ZKVoter} from "../src/ZKVoter.sol";
-import {Poseidon2_BN254 as Poseidon2} from "@poseidon/src/bn254/solidity/Poseidon2.sol";
+import {Poseidon2_BN254 as Poseidon2, Field} from "@poseidon/src/bn254/solidity/Poseidon2.sol";
 import {HonkVerifier as CommitmentVerifier} from "../src/verifiers/CommitmentVerifier.sol";
 import {HonkVerifier as VoteVerifier} from "../src/verifiers/VoteVerifier.sol";
+import {HonkVerifier as VotedProofVerifier} from "../src/verifiers/VotedProofVerifier.sol";
 import {IVerifier} from "../src/verifiers/IVerifier.sol";
 
 contract ZkVoterTest is Test {
@@ -21,12 +22,14 @@ contract ZkVoterTest is Test {
         hasher = new Poseidon2();
         CommitmentVerifier commitmentVerifier = new CommitmentVerifier();
         VoteVerifier voteVerifier = new VoteVerifier();
+        VotedProofVerifier votedProofVerifier = new VotedProofVerifier();
 
         voter = new ZKVoter(
             DEPTH,
             hasher,
             IVerifier(address(commitmentVerifier)),
-            IVerifier(address(voteVerifier))
+            IVerifier(address(voteVerifier)),
+            IVerifier(address(votedProofVerifier))
         );
 
         // start first proposal
@@ -49,26 +52,35 @@ contract ZkVoterTest is Test {
     
     function testCastVote() external {
         uint32 proposalId = 0;
-        (bytes32 nullifier, bytes32 secret, bytes32 commitment, bytes memory proof) = generateCommitmentWithProof(alice, proposalId);
+        (bytes32 nullifier, bytes32 secret, bytes32 commitment) = _makeCommitment(alice, proposalId);
+        _castAndVerifyVote(nullifier, secret, commitment, proposalId);
+    }
 
-        vm.prank(alice);
+    function _makeCommitment(address user, uint32 proposalId) internal returns (bytes32 nullifier, bytes32 secret, bytes32 commitment) {
+        bytes memory proof;
+        (nullifier, secret, commitment, proof) = generateCommitmentWithProof(user, proposalId);
+
+        vm.prank(user);
         vm.expectEmit(false, false, false, true);
         emit ZKVoter.VoteCommitmentMade(proposalId, commitment);
         voter.makeVoteCommitment(proof, commitment, proposalId);
+    }
 
+    function _castAndVerifyVote(bytes32 nullifier, bytes32 secret, bytes32 commitment, uint32 proposalId) internal {
         ZKVoter.Vote vote = ZKVoter.Vote.For;
-
         uint256 prevForVotesCount = voter.getProposalInfo(proposalId).forVotes;
+        (bytes memory voteProof, bytes memory votedProof, bytes32 nullifierHash, bytes32 root, bytes32 nullifierRoot) = generateCastVoteProof(nullifier, secret, commitment, proposalId, vote);
 
-        (bytes memory voteProof, bytes32 nullifierHash, bytes32 root) = generateCastVoteProof(nullifier, secret, commitment, proposalId, vote);
         vm.expectEmit(false, false, false, true);
         emit ZKVoter.Voted(proposalId, vote);
         voter.castVote(voteProof, root, nullifierHash, proposalId, vote);
 
-        uint256 currentForVotesCount = voter.getProposalInfo(proposalId).forVotes;
-
+        assertEq(voter.getProposalInfo(proposalId).forVotes, prevForVotesCount + 1);
         assert(voter.s_nullifierHashes(nullifierHash));
-        assertEq(currentForVotesCount, prevForVotesCount + 1);
+        assert(voter.s_hasVoted(alice, proposalId) == false);
+
+        voter.markVoted(votedProof, alice, proposalId, nullifierRoot);
+        assert(voter.s_hasVoted(alice, proposalId));
 
         vm.expectRevert();
         voter.castVote(voteProof, root, nullifierHash, proposalId, vote);
@@ -85,7 +97,7 @@ contract ZkVoterTest is Test {
 
         ZKVoter.Vote vote = ZKVoter.Vote.For;
 
-        (bytes memory voteProof, bytes32 nullifierHash, bytes32 root) = generateCastVoteProof(nullifier, secret, commitment, proposalId, vote);
+        (bytes memory voteProof, , bytes32 nullifierHash, bytes32 root, ) = generateCastVoteProof(nullifier, secret, commitment, proposalId, vote);
         vm.expectRevert();
         voter.castVote(voteProof, root, nullifierHash, proposalId, ZKVoter.Vote.Against);
     }
@@ -102,8 +114,8 @@ contract ZkVoterTest is Test {
         (commitment, nullifier, secret, proof) = abi.decode(output, (bytes32, bytes32, bytes32, bytes));
     }
 
-    function generateCastVoteProof(bytes32 nullifier, bytes32 secret, bytes32 commitment, uint32 proposalId, ZKVoter.Vote vote) internal returns (bytes memory proof, bytes32 nullifierHash, bytes32 root) {
-        string[] memory commands = new string[](9);
+    function generateCastVoteProof(bytes32 nullifier, bytes32 secret, bytes32 commitment, uint32 proposalId, ZKVoter.Vote vote) internal returns (bytes memory proof, bytes memory votedProof, bytes32 nullifierHash, bytes32 root, bytes32 nullifierRoot) {
+        string[] memory commands = new string[](11);
 
         commands[0] = "npx";
         commands[1] = "tsx";
@@ -114,12 +126,12 @@ contract ZkVoterTest is Test {
         commands[6] = vm.toString(uint8(vote));
         commands[7] = vm.toString((uint256(1)));
         commands[8] = vm.toString(commitment);
+        commands[9] = vm.toString((uint256(1)));
 
-        console2.log(commands[3]);
-        console2.log(commands[4]);
-        console2.log(commands[8]);
+        bytes32 _nullifierHash = Field.toBytes32(hasher.hash_2(Field.toField(nullifier), Field.toField(proposalId)));
+        commands[10] = vm.toString(_nullifierHash);
 
         bytes memory output = vm.ffi(commands);
-        (proof, root, nullifierHash) = abi.decode(output, (bytes, bytes32, bytes32));
+        (proof, votedProof, root, nullifierHash, nullifierRoot) = abi.decode(output, (bytes, bytes, bytes32, bytes32, bytes32));
     }
 }

@@ -5,7 +5,9 @@ pragma solidity 0.8.35;
 import {IncrementalMerkleTree, Poseidon2} from "./IncrementalMerkleTree.sol";
 import {IVerifier} from "./verifiers/IVerifier.sol";
 
-contract ZKVoter is IncrementalMerkleTree {
+contract ZKVoter {
+    using IncrementalMerkleTree for IncrementalMerkleTree.MerkleTree;
+
     // errors
     error ZKVoter__NotOwner();
     error ZKVoter__ProposalNotActive();
@@ -17,6 +19,8 @@ contract ZKVoter is IncrementalMerkleTree {
     error ZKVoter__NullifierHashConsumed();
     error ZKVoter__InvalidVote();
     error ZKVoter__UnknownRoot();
+    error ZKVoter__InvalidCommitment();
+    error ZKVoter__AlreadyMarkedVoted();
 
     // structs
     struct Proposal {
@@ -38,11 +42,16 @@ contract ZKVoter is IncrementalMerkleTree {
     mapping(bytes32 => bool) public s_commitments;
     mapping(bytes32 => bool) public s_nullifierHashes;
     mapping(uint32 => Proposal) public s_proposals;
-    mapping(address => mapping(uint32 => bool)) public s_commitmentMade;
+    mapping(address voter => mapping(uint32 proposal => bytes32)) public s_commitmentMade;
+    mapping(address voter => mapping(uint32 proposal => bool)) public s_hasVoted;
     uint32 public s_nextProposalIndex;
     address public immutable i_owner;
     IVerifier public immutable i_commitmentVerifier;
     IVerifier public immutable i_castVoteVerifier;
+    IVerifier public immutable i_votedVerifier;
+
+    IncrementalMerkleTree.MerkleTree private s_commitmentMerkleTree;
+    IncrementalMerkleTree.MerkleTree private s_nullifierMerkleTree;
 
     // modifiers
     modifier onlyOwner() {
@@ -52,16 +61,20 @@ contract ZKVoter is IncrementalMerkleTree {
         _;
     }
 
-    constructor(uint32 _depth, Poseidon2 _hasher, IVerifier _commitmentVerifier, IVerifier _castVoteVerifier) IncrementalMerkleTree(_depth, _hasher) {
+    constructor(uint32 _depth, Poseidon2 _hasher, IVerifier _commitmentVerifier, IVerifier _castVoteVerifier, IVerifier _votedVerifier) {
         i_owner = msg.sender;
         i_commitmentVerifier = _commitmentVerifier;
         i_castVoteVerifier = _castVoteVerifier;
+        i_votedVerifier = _votedVerifier;
+        s_commitmentMerkleTree.init(_depth, _hasher);
+        s_nullifierMerkleTree.init(_depth, _hasher);
     }
 
     // events
     event ProposalCreated(uint32 proposalId, uint256 creationTime);
     event VoteCommitmentMade(uint32 proposalId, bytes32 commitment);
     event Voted(uint32 proposalId, Vote vote);
+    event MarkedVoted(address voter, uint32 proposalId);
 
     // functions
     function makeNewProposal(string memory _proposal, uint256 _duration) external onlyOwner returns (uint32 proposalId) {
@@ -78,14 +91,14 @@ contract ZKVoter is IncrementalMerkleTree {
         emit ProposalCreated(proposalId, block.timestamp);
     }
 
-    // @todo improvement: For each proposal have whitelisted voters with a separate merkle root1
+    // @todo improvement: For each proposal have whitelisted voters with a separate merkle root
     function makeVoteCommitment(bytes memory _proof, bytes32 _commitment, uint32 _proposalId) external {
         // check commitment consumed
         if (s_commitments[_commitment]) {
             revert ZKVoter__CommitmentAlreadyConsumed();
         }
 
-        if (s_commitmentMade[msg.sender][_proposalId]) {
+        if (s_commitmentMade[msg.sender][_proposalId] != bytes32(0)) {
             revert ZKVoter__ProposalAlreadyCommitted();
         }
 
@@ -109,8 +122,8 @@ contract ZKVoter is IncrementalMerkleTree {
         }
 
         s_commitments[_commitment] = true;
-        s_commitmentMade[msg.sender][_proposalId] = true;
-        _insert(_commitment);
+        s_commitmentMade[msg.sender][_proposalId] = _commitment;
+        s_commitmentMerkleTree.insert(_commitment);
 
         emit VoteCommitmentMade(_proposalId, _commitment);
     }
@@ -120,7 +133,7 @@ contract ZKVoter is IncrementalMerkleTree {
             revert ZKVoter__NullifierHashConsumed();
         }
 
-        if (!isKnownRoot(root)) {
+        if (!s_commitmentMerkleTree.isKnownRoot(root)) {
             revert ZKVoter__UnknownRoot();
         }
 
@@ -137,6 +150,7 @@ contract ZKVoter is IncrementalMerkleTree {
         }
 
         s_nullifierHashes[nullifierHash] = true;
+        s_nullifierMerkleTree.insert(nullifierHash);
 
         if (s_proposals[proposalId].deadline < block.timestamp) {
             revert ZkVoter__ProposalDeadlineReached();
@@ -156,6 +170,37 @@ contract ZKVoter is IncrementalMerkleTree {
         }
 
         emit Voted(proposalId, vote);
+    }
+
+    function markVoted(bytes memory proof, address voter, uint32 proposalId, bytes32 nullifierMerkleRoot) external {
+        bytes32 _commitment = s_commitmentMade[voter][proposalId];
+
+        if (_commitment == bytes32(0)) {
+            revert ZKVoter__InvalidCommitment();
+        }
+
+        if (s_hasVoted[voter][proposalId]) {
+            revert ZKVoter__AlreadyMarkedVoted();
+        }
+
+        if (!s_nullifierMerkleTree.isKnownRoot(nullifierMerkleRoot)) {
+            revert ZKVoter__UnknownRoot();
+        }
+
+        bytes32[] memory _publicInputs = new bytes32[](3);
+        _publicInputs[0] = _commitment;
+        _publicInputs[1] = bytes32(uint256(0));
+        _publicInputs[2] = nullifierMerkleRoot;
+
+        bool result = i_votedVerifier.verify(proof, _publicInputs);
+
+        if (!result) {
+            revert ZKVoter__InvalidProof();
+        }
+
+        s_hasVoted[voter][proposalId] = true;
+
+        emit MarkedVoted(voter, proposalId);
     }
 
     function getProposalInfo(uint32 proposalId) external view returns (Proposal memory) {

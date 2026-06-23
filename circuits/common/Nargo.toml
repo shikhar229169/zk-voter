@@ -1,8 +1,7 @@
 [package]
-name = "vote"
-type = "bin"
+name = "common"
+type = "lib"
 authors = [""]
 
 [dependencies]
 poseidon = { tag = "v0.3.0", git = "https://github.com/noir-lang/poseidon" }
-common = { path = "../common" }
